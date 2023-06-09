@@ -73,6 +73,14 @@
 #pragma warning (disable: 4127) // condition expression is constant
 #endif
 
+#ifdef VK_NO_PROTOTYPES
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
+    VkInstance                                  instance,
+    const char*                                 pName);
+#endif
+
+namespace imgui_impl_vulkan {
+
 // Reusable buffers used for rendering 1 current in-flight frame, for ImGui_ImplVulkan_RenderDrawData()
 // [Please zero-clear before use!]
 struct ImGui_ImplVulkanH_FrameRenderBuffers
@@ -137,14 +145,8 @@ void ImGui_ImplVulkanH_DestroyWindowRenderBuffers(VkDevice device, ImGui_ImplVul
 void ImGui_ImplVulkanH_CreateWindowSwapChain(VkPhysicalDevice physical_device, VkDevice device, ImGui_ImplVulkanH_Window* wd, const VkAllocationCallbacks* allocator, int w, int h, uint32_t min_image_count);
 void ImGui_ImplVulkanH_CreateWindowCommandBuffers(VkPhysicalDevice physical_device, VkDevice device, ImGui_ImplVulkanH_Window* wd, uint32_t queue_family, const VkAllocationCallbacks* allocator);
 
-// Vulkan prototypes for use with custom loaders
-// (see description of IMGUI_IMPL_VULKAN_NO_PROTOTYPES in imgui_impl_vulkan.h
-#ifdef VK_NO_PROTOTYPES
 static bool g_FunctionsLoaded = false;
-#else
-static bool g_FunctionsLoaded = true;
-#endif
-#ifdef VK_NO_PROTOTYPES
+
 #define IMGUI_VULKAN_FUNC_MAP(IMGUI_VULKAN_FUNC_MAP_MACRO) \
     IMGUI_VULKAN_FUNC_MAP_MACRO(vkAllocateCommandBuffers) \
     IMGUI_VULKAN_FUNC_MAP_MACRO(vkAllocateDescriptorSets) \
@@ -210,7 +212,6 @@ static bool g_FunctionsLoaded = true;
 #define IMGUI_VULKAN_FUNC_DEF(func) static PFN_##func func;
 IMGUI_VULKAN_FUNC_MAP(IMGUI_VULKAN_FUNC_DEF)
 #undef IMGUI_VULKAN_FUNC_DEF
-#endif // VK_NO_PROTOTYPES
 
 //-----------------------------------------------------------------------------
 // SHADERS
@@ -941,28 +942,36 @@ void    ImGui_ImplVulkan_DestroyDeviceObjects()
 
 bool    ImGui_ImplVulkan_LoadFunctions(PFN_vkVoidFunction(*loader_func)(const char* function_name, void* user_data), void* user_data)
 {
-    // Load function pointers
-    // You can use the default Vulkan loader using:
-    //      ImGui_ImplVulkan_LoadFunctions([](const char* function_name, void*) { return vkGetInstanceProcAddr(your_vk_isntance, function_name); });
-    // But this would be equivalent to not setting VK_NO_PROTOTYPES.
-#ifdef VK_NO_PROTOTYPES
+    // Load function pointers, if not called by the user, the backend will assume it can call
+    // vkGetInstanceProcAddr directly to load the other functions.
+    IM_ASSERT(!g_FunctionsLoaded && "Already loaded functions!");
+
 #define IMGUI_VULKAN_FUNC_LOAD(func) \
-    func = reinterpret_cast<decltype(func)>(loader_func(#func, user_data)); \
+    func = reinterpret_cast<PFN_##func>(loader_func(#func, user_data)); \
     if (func == nullptr)   \
         return false;
     IMGUI_VULKAN_FUNC_MAP(IMGUI_VULKAN_FUNC_LOAD)
 #undef IMGUI_VULKAN_FUNC_LOAD
-#else
-    IM_UNUSED(loader_func);
-    IM_UNUSED(user_data);
-#endif
+
     g_FunctionsLoaded = true;
     return true;
 }
 
+static bool ImGui_ImplVulkan_EnsureFunctionsLoaded(VkInstance instance)
+{
+    if (g_FunctionsLoaded)
+        return true;
+#ifdef VK_NO_PROTOTYPES
+    IM_ASSERT(!"Need to call ImGui_ImplVulkan_LoadFunctions() if IMGUI_IMPL_VULKAN_NO_PROTOTYPES or VK_NO_PROTOTYPES are set!");
+#endif
+    return ::ImGui_ImplVulkan_LoadFunctions([](const char* function_name, void* data) {
+        return ::vkGetInstanceProcAddr((VkInstance)data, function_name);
+    }, instance);
+}
+
 bool    ImGui_ImplVulkan_Init(ImGui_ImplVulkan_InitInfo* info, VkRenderPass render_pass)
 {
-    IM_ASSERT(g_FunctionsLoaded && "Need to call ImGui_ImplVulkan_LoadFunctions() if IMGUI_IMPL_VULKAN_NO_PROTOTYPES or VK_NO_PROTOTYPES are set!");
+    IM_ASSERT(ImGui_ImplVulkan_EnsureFunctionsLoaded(info->Instance));
 
     ImGuiIO& io = ImGui::GetIO();
     IM_ASSERT(io.BackendRendererUserData == nullptr && "Already initialized a renderer backend!");
@@ -1084,9 +1093,9 @@ void ImGui_ImplVulkan_RemoveTexture(VkDescriptorSet descriptor_set)
 // (The ImGui_ImplVulkanH_XXX functions do not interact with any of the state used by the regular ImGui_ImplVulkan_XXX functions)
 //-------------------------------------------------------------------------
 
-VkSurfaceFormatKHR ImGui_ImplVulkanH_SelectSurfaceFormat(VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VkFormat* request_formats, int request_formats_count, VkColorSpaceKHR request_color_space)
+VkSurfaceFormatKHR ImGui_ImplVulkanH_SelectSurfaceFormat(VkInstance instance, VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VkFormat* request_formats, int request_formats_count, VkColorSpaceKHR request_color_space)
 {
-    IM_ASSERT(g_FunctionsLoaded && "Need to call ImGui_ImplVulkan_LoadFunctions() if IMGUI_IMPL_VULKAN_NO_PROTOTYPES or VK_NO_PROTOTYPES are set!");
+    IM_ASSERT(ImGui_ImplVulkan_EnsureFunctionsLoaded(instance));
     IM_ASSERT(request_formats != nullptr);
     IM_ASSERT(request_formats_count > 0);
 
@@ -1129,9 +1138,9 @@ VkSurfaceFormatKHR ImGui_ImplVulkanH_SelectSurfaceFormat(VkPhysicalDevice physic
     }
 }
 
-VkPresentModeKHR ImGui_ImplVulkanH_SelectPresentMode(VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VkPresentModeKHR* request_modes, int request_modes_count)
+VkPresentModeKHR ImGui_ImplVulkanH_SelectPresentMode(VkInstance instance, VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VkPresentModeKHR* request_modes, int request_modes_count)
 {
-    IM_ASSERT(g_FunctionsLoaded && "Need to call ImGui_ImplVulkan_LoadFunctions() if IMGUI_IMPL_VULKAN_NO_PROTOTYPES or VK_NO_PROTOTYPES are set!");
+    IM_ASSERT(ImGui_ImplVulkan_EnsureFunctionsLoaded(instance));
     IM_ASSERT(request_modes != nullptr);
     IM_ASSERT(request_modes_count > 0);
 
@@ -1239,7 +1248,7 @@ void ImGui_ImplVulkanH_CreateWindowSwapChain(VkPhysicalDevice physical_device, V
 
     // If min image count was not specified, request different count of images dependent on selected present mode
     if (min_image_count == 0)
-        min_image_count = ImGui_ImplVulkanH_GetMinImageCountFromPresentMode(wd->PresentMode);
+        min_image_count = ::ImGui_ImplVulkanH_GetMinImageCountFromPresentMode(wd->PresentMode);
 
     // Create Swapchain
     {
@@ -1382,8 +1391,7 @@ void ImGui_ImplVulkanH_CreateWindowSwapChain(VkPhysicalDevice physical_device, V
 // Create or resize window
 void ImGui_ImplVulkanH_CreateOrResizeWindow(VkInstance instance, VkPhysicalDevice physical_device, VkDevice device, ImGui_ImplVulkanH_Window* wd, uint32_t queue_family, const VkAllocationCallbacks* allocator, int width, int height, uint32_t min_image_count)
 {
-    IM_ASSERT(g_FunctionsLoaded && "Need to call ImGui_ImplVulkan_LoadFunctions() if IMGUI_IMPL_VULKAN_NO_PROTOTYPES or VK_NO_PROTOTYPES are set!");
-    (void)instance;
+    IM_ASSERT(ImGui_ImplVulkan_EnsureFunctionsLoaded(instance));
     ImGui_ImplVulkanH_CreateWindowSwapChain(physical_device, device, wd, allocator, width, height, min_image_count);
     ImGui_ImplVulkanH_CreateWindowCommandBuffers(physical_device, device, wd, queue_family, allocator);
 }
@@ -1449,3 +1457,21 @@ void ImGui_ImplVulkanH_DestroyWindowRenderBuffers(VkDevice device, ImGui_ImplVul
     buffers->Index = 0;
     buffers->Count = 0;
 }
+
+} // namespace imgui_impl_vulkan
+
+bool                 ImGui_ImplVulkan_Init(ImGui_ImplVulkan_InitInfo* info, VkRenderPass render_pass) { return imgui_impl_vulkan::ImGui_ImplVulkan_Init(info, render_pass); }
+void                 ImGui_ImplVulkan_Shutdown() { imgui_impl_vulkan::ImGui_ImplVulkan_Shutdown(); }
+void                 ImGui_ImplVulkan_NewFrame() { imgui_impl_vulkan::ImGui_ImplVulkan_NewFrame(); }
+void                 ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer command_buffer, VkPipeline pipeline) { imgui_impl_vulkan::ImGui_ImplVulkan_RenderDrawData(draw_data, command_buffer, pipeline); }
+bool                 ImGui_ImplVulkan_CreateFontsTexture(VkCommandBuffer command_buffer) { return imgui_impl_vulkan::ImGui_ImplVulkan_CreateFontsTexture(command_buffer); }
+void                 ImGui_ImplVulkan_DestroyFontUploadObjects() { imgui_impl_vulkan::ImGui_ImplVulkan_DestroyFontUploadObjects(); }
+void                 ImGui_ImplVulkan_SetMinImageCount(uint32_t min_image_count) { imgui_impl_vulkan::ImGui_ImplVulkan_SetMinImageCount(min_image_count); }
+VkDescriptorSet      ImGui_ImplVulkan_AddTexture(VkSampler sampler, VkImageView image_view, VkImageLayout image_layout) { return imgui_impl_vulkan::ImGui_ImplVulkan_AddTexture(sampler, image_view, image_layout); }
+void                 ImGui_ImplVulkan_RemoveTexture(VkDescriptorSet descriptor_set) { imgui_impl_vulkan::ImGui_ImplVulkan_RemoveTexture(descriptor_set); }
+bool                 ImGui_ImplVulkan_LoadFunctions(PFN_vkVoidFunction(*loader_func)(const char* function_name, void* user_data), void* user_data) { return imgui_impl_vulkan::ImGui_ImplVulkan_LoadFunctions(loader_func, user_data); }
+void                 ImGui_ImplVulkanH_CreateOrResizeWindow(VkInstance instance, VkPhysicalDevice physical_device, VkDevice device, ImGui_ImplVulkanH_Window* wnd, uint32_t queue_family, const VkAllocationCallbacks* allocator, int w, int h, uint32_t min_image_count) { imgui_impl_vulkan::ImGui_ImplVulkanH_CreateOrResizeWindow(instance, physical_device, device, wnd, queue_family, allocator, w, h, min_image_count); }
+void                 ImGui_ImplVulkanH_DestroyWindow(VkInstance instance, VkDevice device, ImGui_ImplVulkanH_Window* wnd, const VkAllocationCallbacks* allocator) { imgui_impl_vulkan::ImGui_ImplVulkanH_DestroyWindow(instance, device, wnd, allocator); }
+VkSurfaceFormatKHR   ImGui_ImplVulkanH_SelectSurfaceFormat(VkInstance instance, VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VkFormat* request_formats, int request_formats_count, VkColorSpaceKHR request_color_space) { return imgui_impl_vulkan::ImGui_ImplVulkanH_SelectSurfaceFormat(instance, physical_device, surface, request_formats, request_formats_count, request_color_space); }
+VkPresentModeKHR     ImGui_ImplVulkanH_SelectPresentMode(VkInstance instance, VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VkPresentModeKHR* request_modes, int request_modes_count) { return imgui_impl_vulkan::ImGui_ImplVulkanH_SelectPresentMode(instance, physical_device, surface, request_modes, request_modes_count); }
+int                  ImGui_ImplVulkanH_GetMinImageCountFromPresentMode(VkPresentModeKHR present_mode) { return imgui_impl_vulkan::ImGui_ImplVulkanH_GetMinImageCountFromPresentMode(present_mode); }
