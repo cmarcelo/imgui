@@ -45,6 +45,23 @@
 #endif
 #include <vulkan/vulkan.h>
 
+// [Dynamic Rendering] Newer versions of Vulkan support VK_KHR_dynamic_rendering extension for
+// simplified rendering. Define IMGUI_IMPL_VULKAN_DYNAMIC_RENDERING to let ImGui use
+// that feature instead of regular RenderPass. Your own pipelines should be using the
+// feature for this to work correctly. Even in Vulkan 1.3, enable the VK_KHR_dynamic_rendering
+// explicitly when using this option.
+//
+// To use, set ColorAttachmentFormat in ImGui_ImplVulkan_InitInfo and
+// pass VK_NULL_HANDLE as the RenderPass in ImGui_ImplVulkan_Init().
+//
+// See instructions above in [Configuration] on how to define this symbol properly.
+//
+//#define IMGUI_IMPL_VULKAN_DYNAMIC_RENDERING
+
+#if defined(IMGUI_IMPL_VULKAN_DYNAMIC_RENDERING) && !defined(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
+#error "You need Vulkan-Header version at least 1.2.97 to use Dynamic Rendering. Also make sure your drivers support it!"
+#endif
+
 // Initialization data, for ImGui_ImplVulkan_Init()
 // [Please zero-clear before use!]
 struct ImGui_ImplVulkan_InitInfo
@@ -62,7 +79,6 @@ struct ImGui_ImplVulkan_InitInfo
     VkSampleCountFlagBits           MSAASamples;            // >= VK_SAMPLE_COUNT_1_BIT (0 -> default to VK_SAMPLE_COUNT_1_BIT)
     const VkAllocationCallbacks*    Allocator;
     void                            (*CheckVkResultFn)(VkResult err);
-    bool                            UseDynamicRendering;    // Need to explicitly enable VK_KHR_dynamic_rendering extension to use this, even for Vulkan 1.3.
     VkFormat                        ColorAttachmentFormat;
 };
 
@@ -140,7 +156,6 @@ struct ImGui_ImplVulkanH_Window
     VkPresentModeKHR    PresentMode;
     VkRenderPass        RenderPass;
     VkPipeline          Pipeline;               // The window pipeline may uses a different VkRenderPass than the one passed in ImGui_ImplVulkan_InitInfo
-    bool                UseDynamicRendering;
     bool                ClearEnable;
     VkClearValue        ClearValue;
     uint32_t            FrameIndex;             // Current frame being rendered to (0 <= FrameIndex < FrameInFlightCount)
