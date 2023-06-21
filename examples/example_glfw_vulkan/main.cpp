@@ -31,6 +31,10 @@
 #define IMGUI_VULKAN_DEBUG_REPORT
 #endif
 
+// Uncomment the line below to configure the example to use
+// VK_KHR_dynamic_rendering extension instead Render Pass object.
+//#define IMGUI_VULKAN_DYNAMIC_RENDERING
+
 static VkAllocationCallbacks*   g_Allocator = NULL;
 static VkInstance               g_Instance = VK_NULL_HANDLE;
 static VkPhysicalDevice         g_PhysicalDevice = VK_NULL_HANDLE;
@@ -69,27 +73,40 @@ static void SetupVulkan(const char** extensions, uint32_t extensions_count)
 
     // Create Vulkan Instance
     {
+        const char *example_extensions[] = {
+#ifdef IMGUI_VULKAN_DEBUG_REPORT
+            "VK_EXT_debug_report",
+#endif
+#ifdef IMGUI_VULKAN_DYNAMIC_RENDERING
+            "VK_KHR_get_physical_device_properties2",
+#endif
+        };
+        uint32_t example_extensions_count = IM_ARRAYSIZE(example_extensions);
+
         VkInstanceCreateInfo create_info = {};
         create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         create_info.enabledExtensionCount = extensions_count;
         create_info.ppEnabledExtensionNames = extensions;
+
+        const char **extensions_ext = nullptr;
+        if (example_extensions_count > 0) {
+            // Enable extra exmaple extensions (we need additional storage, so we duplicate the user array to add our new extensions to it)
+            extensions_ext = (const char **) malloc(sizeof(const char *) * (extensions_count + example_extensions_count));
+            memcpy(extensions_ext, extensions, extensions_count * sizeof(const char *));
+            memcpy(extensions_ext + extensions_count, example_extensions, example_extensions_count * sizeof(const char *));
+            create_info.enabledExtensionCount = extensions_count + example_extensions_count;
+            create_info.ppEnabledExtensionNames = extensions_ext;
+        }
+
 #ifdef IMGUI_VULKAN_DEBUG_REPORT
         // Enabling validation layers
         const char* layers[] = { "VK_LAYER_KHRONOS_validation" };
         create_info.enabledLayerCount = 1;
         create_info.ppEnabledLayerNames = layers;
 
-        // Enable debug report extension (we need additional storage, so we duplicate the user array to add our new extension to it)
-        const char** extensions_ext = (const char**)malloc(sizeof(const char*) * (extensions_count + 1));
-        memcpy(extensions_ext, extensions, extensions_count * sizeof(const char*));
-        extensions_ext[extensions_count] = "VK_EXT_debug_report";
-        create_info.enabledExtensionCount = extensions_count + 1;
-        create_info.ppEnabledExtensionNames = extensions_ext;
-
         // Create Vulkan Instance
         err = vkCreateInstance(&create_info, g_Allocator, &g_Instance);
         check_vk_result(err);
-        free(extensions_ext);
 
         // Get the function pointer (required for any extensions)
         auto vkCreateDebugReportCallbackEXT = (PFN_vkCreateDebugReportCallbackEXT)vkGetInstanceProcAddr(g_Instance, "vkCreateDebugReportCallbackEXT");
@@ -109,6 +126,7 @@ static void SetupVulkan(const char** extensions, uint32_t extensions_count)
         check_vk_result(err);
         IM_UNUSED(g_DebugReport);
 #endif
+        free(extensions_ext);
     }
 
     // Select GPU
@@ -159,8 +177,18 @@ static void SetupVulkan(const char** extensions, uint32_t extensions_count)
 
     // Create Logical Device (with 1 queue)
     {
-        int device_extension_count = 1;
-        const char* device_extensions[] = { "VK_KHR_swapchain" };
+        const char* device_extensions[] = {
+            "VK_KHR_swapchain",
+#if defined(IMGUI_VULKAN_DYNAMIC_RENDERING)
+            // Vulkan requires to list all dependencies of VK_KHR_dynamic_rendering.
+            "VK_KHR_maintenance2",
+            "VK_KHR_multiview",
+            "VK_KHR_create_renderpass2",
+            "VK_KHR_depth_stencil_resolve",
+            "VK_KHR_dynamic_rendering",
+#endif
+        };
+        int device_extension_count = IM_ARRAYSIZE(device_extensions);
         const float queue_priority[] = { 1.0f };
         VkDeviceQueueCreateInfo queue_info[1] = {};
         queue_info[0].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -173,6 +201,12 @@ static void SetupVulkan(const char** extensions, uint32_t extensions_count)
         create_info.pQueueCreateInfos = queue_info;
         create_info.enabledExtensionCount = device_extension_count;
         create_info.ppEnabledExtensionNames = device_extensions;
+#if defined(IMGUI_VULKAN_DYNAMIC_RENDERING)
+        VkPhysicalDeviceDynamicRenderingFeaturesKHR dyn_rendering_features = {};
+        dyn_rendering_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
+        dyn_rendering_features.dynamicRendering = VK_TRUE;
+        create_info.pNext = &dyn_rendering_features;
+#endif
         err = vkCreateDevice(g_PhysicalDevice, &create_info, g_Allocator, &g_Device);
         check_vk_result(err);
         vkGetDeviceQueue(g_Device, g_QueueFamily, 0, &g_Queue);
@@ -289,6 +323,43 @@ static void FrameRender(ImGui_ImplVulkanH_Window* wd, ImDrawData* draw_data)
         err = vkBeginCommandBuffer(fd->CommandBuffer, &info);
         check_vk_result(err);
     }
+
+    // Begin rendering
+#if defined(IMGUI_VULKAN_DYNAMIC_RENDERING)
+    {
+        // Transition swapchain image to a layout suitable for drawing.
+        VkImageMemoryBarrier barrier = {};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.image = fd->Backbuffer;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.layerCount = 1;
+        vkCmdPipelineBarrier(fd->CommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        // Begin rendering
+        VkRenderingAttachmentInfoKHR attach_info = {};
+        attach_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+        attach_info.loadOp = wd->ClearEnable ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attach_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attach_info.clearValue = wd->ClearValue;
+        attach_info.imageView = fd->BackbufferView;
+        attach_info.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkRenderingInfoKHR info = {};
+        info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
+        info.renderArea.extent.width = wd->Width;
+        info.renderArea.extent.height = wd->Height;
+        info.layerCount = 1;
+        info.colorAttachmentCount = 1;
+        info.pColorAttachments = &attach_info;
+
+        static auto vkCmdBeginRenderingKHR = reinterpret_cast<PFN_vkCmdBeginRenderingKHR>(vkGetInstanceProcAddr(g_Instance, "vkCmdBeginRenderingKHR"));
+        vkCmdBeginRenderingKHR(fd->CommandBuffer, &info);
+    }
+#else
     {
         VkRenderPassBeginInfo info = {};
         info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -300,12 +371,34 @@ static void FrameRender(ImGui_ImplVulkanH_Window* wd, ImDrawData* draw_data)
         info.pClearValues = &wd->ClearValue;
         vkCmdBeginRenderPass(fd->CommandBuffer, &info, VK_SUBPASS_CONTENTS_INLINE);
     }
+#endif
 
     // Record dear imgui primitives into command buffer
     ImGui_ImplVulkan_RenderDrawData(draw_data, fd->CommandBuffer);
 
-    // Submit command buffer
+    // End rendering
+#if defined(IMGUI_VULKAN_DYNAMIC_RENDERING)
+    {
+        static auto vkCmdEndRenderingKHR = reinterpret_cast<PFN_vkCmdEndRenderingKHR>(vkGetInstanceProcAddr(g_Instance, "vkCmdEndRenderingKHR"));
+        vkCmdEndRenderingKHR(fd->CommandBuffer);
+
+        // Transition image to a layout suitable for presentation
+        VkImageMemoryBarrier barrier = {};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        barrier.image = fd->Backbuffer;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.layerCount = 1;
+        vkCmdPipelineBarrier(fd->CommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    }
+#else
     vkCmdEndRenderPass(fd->CommandBuffer);
+#endif
+
+    // Submit command buffer
     {
         VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         VkSubmitInfo info = {};
@@ -422,6 +515,11 @@ int main(int, char**)
     init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     init_info.Allocator = g_Allocator;
     init_info.CheckVkResultFn = check_vk_result;
+    init_info.ColorAttachmentFormat = wd->SurfaceFormat.format;
+#if defined(IMGUI_VULKAN_DYNAMIC_RENDERING)
+    init_info.UseDynamicRendering = VK_TRUE;
+    wd->RenderPass = VK_NULL_HANDLE;
+#endif
     ImGui_ImplVulkan_Init(&init_info, wd->RenderPass);
 
     // Load Fonts
